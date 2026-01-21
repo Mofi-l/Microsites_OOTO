@@ -2,13 +2,13 @@
 // @name         Microsites_OOTO
 // @namespace    https://amazon.com/
 // @version      0.2
+// @updateURL    https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_meta.js
+// @downloadURL  https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_user.js
 // @description  Schedule Quick connects and send OOTO from the phonetool page - Microsites
 // @author       @mofila
 // @match        https://phonetool.amazon.com/users/*
 // @match        https://connect.amazon.com/users/*
 // @match        https://outlook.office.com/*
-// @updateURL    https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_meta.js
-// @downloadURL  https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_user.js
 // @grant        GM.xmlHttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -69,11 +69,11 @@
                         if (_.status == 200) {
                             const responseBody = JSON.parse(_.response).Body;
                             var amazonAddress = responseBody.ResultSet
-                            .filter(_ => Object.keys(_).includes('PersonaTypeString'))
-                            .filter(_ => _.PersonaTypeString == 'Person')
-                            .filter(_ => Object.keys(_).includes('EmailAddress'))
-                            .map(_ => _.EmailAddress.EmailAddress)
-                            .find(_ => _.startsWith(username + '@amazon'));
+                                .filter(_ => Object.keys(_).includes('PersonaTypeString'))
+                                .filter(_ => _.PersonaTypeString == 'Person')
+                                .filter(_ => Object.keys(_).includes('EmailAddress'))
+                                .map(_ => _.EmailAddress.EmailAddress)
+                                .find(_ => _.startsWith(username + '@amazon'));
                             amazonAddress = amazonAddress || username + '@amazon.com';
                             resolve(amazonAddress);
                         } else {
@@ -126,6 +126,8 @@
                             const events = [];
                             response.Body.Responses.map(_ => _.CalendarView.Items.filter(_ => _.FreeBusyType != 'Free')).forEach(group => {
                                 for (let i = 0; i < group.length; i++) {
+                                    // Merge together events of the same type if this is not self view
+                                    // TODO: merge together events of all types
                                     if (!isSelfView) {
                                         if (group[i + 1] && group[i].End >= group[i + 1].Start) {
                                             if (group[i].FreeBusyType == group[i + 1].FreeBusyType) {
@@ -383,9 +385,6 @@
         }
     })
 
-    const EXCHANGE_DATA_PROVIDER = buildDataProvider('exchange', 'https://ballard.amazon.com');
-    const M365_DATA_PROVIDER = buildDataProvider('m365', 'https://outlook.office.com');
-
     function showEmailContentDialog(emailContent, callback) {
         // Convert HTML content to plain text
         const plainTextContent = emailContent
@@ -494,6 +493,9 @@
         });
     }
 
+    const EXCHANGE_DATA_PROVIDER = buildDataProvider('exchange', 'https://ballard.amazon.com');
+    const M365_DATA_PROVIDER = buildDataProvider('m365', 'https://outlook.office.com');
+
     function getBody() {
         return new Promise((resolve) => {
             const supervisorXPath = "/html/body/div[2]/div[1]/div/div/form/div[1]/div[2]/div[4]/div[2]/p/a";
@@ -559,7 +561,7 @@ This is a quick meeting scheduled through Phonetool Calendar.
     }
 
     function isSundayToThursdayWeek() {
-        return getTargetUser().targetUserBuilding.match(/^(TLV|HFA|AMM|CAI|JED|RUH|DMM|AHB|ELQ|HOF|ALY|LXR|KWI)/);
+      return getTargetUser().targetUserBuilding.match(/^(TLV|HFA|AMM|CAI|JED|RUH|DMM|AHB|ELQ|HOF|ALY|LXR|KWI)/);
     }
 
     const Days = {
@@ -589,7 +591,7 @@ This is a quick meeting scheduled through Phonetool Calendar.
         // This can be simplified when https://github.com/fullcalendar/fullcalendar/issues/4440 is resolved
         return startTime < endTime
             ? { daysOfWeek, startTime, endTime }
-        : [{ daysOfWeek, startTime: '00:00', endTime }, { daysOfWeek, startTime, endTime: '24:00' }];
+            : [{ daysOfWeek, startTime: '00:00', endTime }, { daysOfWeek, startTime, endTime: '24:00' }];
     }
 
     async function getCredentials(dataProvider) {
@@ -1029,7 +1031,7 @@ This is a quick meeting scheduled through Phonetool Calendar.
         }
 
         const subjectText = user === currentUser
-        ? `This will create an Out of the Office calendar entry`
+            ? `This will create an Out of the Office calendar entry`
             : `This will create a quick meeting with @${user}`;
 
         const calendarParams = {
@@ -1061,13 +1063,13 @@ This is a quick meeting scheduled through Phonetool Calendar.
                         }
                         dataProvider.createMeeting({ subject, organizer: currentEmail, requiredAttendees, start, end })
                             .then(_ => {
-                            alert(`The meeting "${subject}" is successfully created!`);
-                            calendar.addEvent({ start, end });
-                        })
+                                alert(`The meeting "${subject}" is successfully created!`);
+                                calendar.addEvent({ start, end });
+                            })
                             .catch(_ => {
-                            console.error(_);
-                            alert('Error');
-                        });
+                                console.error(_);
+                                alert('Error');
+                            });
                     }
                 }
                 calendar.unselect();
@@ -1095,6 +1097,48 @@ This is a quick meeting scheduled through Phonetool Calendar.
             calendar.updateSize()
         });
         resizeObserver.observe(container);
+    }
+
+    const container = document.createElement('div');
+    container.className = 'ooto-widget';
+    document.querySelector('.SharePassion').prepend(container);
+    createOOTOForm(container);
+
+    phonetoolScript();
+
+    // Token interception for outlook.office.com
+    if (window.location.hostname === 'outlook.office.com') {
+        // Intercept fetch requests
+        const originalFetch = unsafeWindow.fetch || window.fetch;
+        const interceptedFetch = function(...args) {
+            const [resource, config] = args;
+            const url = typeof resource === 'string' ? resource : resource.url;
+
+            if (url && url.includes('/owa/service.svc') && config && config.headers) {
+                const headers = config.headers;
+                let authHeader = null;
+
+                // Headers can be a Headers object, plain object, or array
+                if (headers instanceof Headers) {
+                    authHeader = headers.get('authorization');
+                } else if (Array.isArray(headers)) {
+                    const authEntry = headers.find(([key]) => key.toLowerCase() === 'authorization');
+                    authHeader = authEntry ? authEntry[1] : null;
+                } else if (typeof headers === 'object') {
+                    authHeader = headers.authorization || headers.Authorization;
+                }
+
+                if (authHeader) {
+                    GM_setValue('outlookJwtToken', authHeader);
+                }
+            }
+
+            return originalFetch.apply(unsafeWindow || window, args);
+        };
+
+        // Replace fetch
+        if (unsafeWindow) unsafeWindow.fetch = interceptedFetch;
+        window.fetch = interceptedFetch;
     }
 
     function showCustomConfirm(message, callback) {
@@ -1271,70 +1315,28 @@ This is a quick meeting scheduled through Phonetool Calendar.
         document.body.appendChild(overlay);
     }
 
-// Add version checking function
-async function checkForUpdates() {
-    try {
-        const response = await fetch('https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_meta.js');
-        const metaContent = await response.text();
+    // Add version checking function
+    async function checkForUpdates() {
+        try {
+            const response = await fetch('https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_meta.js');
+            const metaContent = await response.text();
 
-        const versionMatch = metaContent.match(/@version\s+(\d+\.\d+)/);
-        if (versionMatch) {
-            const latestVersion = versionMatch[1];
-            const currentVersion = "0.02"; // Hardcode current version here
+            const versionMatch = metaContent.match(/@version\s+(\d+\.\d+)/);
+            if (versionMatch) {
+                const latestVersion = versionMatch[1];
+                const currentVersion = "0.02"; // Hardcode current version here
 
-            if (parseFloat(latestVersion) > parseFloat(currentVersion)) {
-                showCustomConfirm('A new version is available. Would you like to update now?', (confirmed) => {
-                    if (confirmed) {
-                        window.location.href = 'https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_user.js';
-                    }
-                });
+                if (parseFloat(latestVersion) > parseFloat(currentVersion)) {
+                    showCustomConfirm('A new version is available. Would you like to update now?', (confirmed) => {
+                        if (confirmed) {
+                            window.location.href = 'https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_user.js';
+                        }
+                    });
+                }
             }
+        } catch (error) {
+            console.error('Error checking for updates:', error);
         }
-    } catch (error) {
-        console.error('Error checking for updates:', error);
-    }
-}
-
-    const container = document.createElement('div');
-    container.className = 'ooto-widget';
-    document.querySelector('.SharePassion').prepend(container);
-    createOOTOForm(container);
-
-    phonetoolScript();
-
-    // Token interception for outlook.office.com
-    if (window.location.hostname === 'outlook.office.com') {
-        // Intercept fetch requests
-        const originalFetch = unsafeWindow.fetch || window.fetch;
-        const interceptedFetch = function(...args) {
-            const [resource, config] = args;
-            const url = typeof resource === 'string' ? resource : resource.url;
-
-            if (url && url.includes('/owa/service.svc') && config && config.headers) {
-                const headers = config.headers;
-                let authHeader = null;
-
-                // Headers can be a Headers object, plain object, or array
-                if (headers instanceof Headers) {
-                    authHeader = headers.get('authorization');
-                } else if (Array.isArray(headers)) {
-                    const authEntry = headers.find(([key]) => key.toLowerCase() === 'authorization');
-                    authHeader = authEntry ? authEntry[1] : null;
-                } else if (typeof headers === 'object') {
-                    authHeader = headers.authorization || headers.Authorization;
-                }
-
-                if (authHeader) {
-                    GM_setValue('outlookJwtToken', authHeader);
-                }
-            }
-
-            return originalFetch.apply(unsafeWindow || window, args);
-        };
-
-        // Replace fetch
-        if (unsafeWindow) unsafeWindow.fetch = interceptedFetch;
-        window.fetch = interceptedFetch;
     }
 
 })();
