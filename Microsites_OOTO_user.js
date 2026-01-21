@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Microsites_OOTO
 // @namespace    https://amazon.com/
-// @version      0.1
+// @version      0.2
 // @description  Schedule Quick connects and send OOTO from the phonetool page - Microsites
 // @author       @mofila
 // @match        https://phonetool.amazon.com/users/*
 // @match        https://connect.amazon.com/users/*
+// @match        https://outlook.office.com/*
 // @updateURL    https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_meta.js
 // @downloadURL  https://raw.githubusercontent.com/Mofi-l/Microsites_OOTO/main/Microsites_OOTO_user.js
 // @grant        GM.xmlHttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -18,47 +21,40 @@
     'use strict';
 
     const MEETING_TYPES = {
-        OOTO: 'OOTO',
-        QUICK: 'QUICK',
-        TEAM: 'TEAM'
+        OOTO: 'ooto',
+        QUICK: 'quick'
     };
 
-    // Add this function for date formatting
     function getFormattedDateRange(start, end) {
         return `(${moment(start).format('YYYY-MM-DD')} - ${moment(end).format('YYYY-MM-DD')})`;
     }
 
-    const ExchangeDataProvider = {
-        name: 'exchange',
-        onajaxerror(reject) {
+    const buildDataProvider = (name, endpoint) => ({
+        name: name,
+        endpoint: endpoint,
+        onajaxerror (reject) {
             return _ => {
-                if (_.status === 449) {}
                 console.error(_);
-                log('error', this.name + ': ' + _.response);
                 reject(_);
             };
         },
-        fetchEmail(username, isRetry) {
+
+        fetchEmail (username, isRetry) {
             return new Promise((resolve, reject) => {
-                const token = this.getToken();
-                console.log('Using token:', token);
-                const backendCookie = document.cookie.split(';').find(cookie => cookie.trim().startsWith('X-BackEndCookie='));
-                const headers = {
-                    action: 'FindPeople',
-                    'content-type': 'application/json; charset=UTF-8',
-                    'x-owa-actionname': 'OwaOptionPage',
-                    'x-owa-canary': token
-                };
-                if (backendCookie) {
-                    headers['X-BackEndCookie'] = backendCookie.split('=')[1];
-                    console.log('Added backend cookie:', headers['X-BackEndCookie']);
-                }
                 GM.xmlHttpRequest({
                     method: 'POST',
-                    url: 'https://outlook.office.com/owa/service.svc',
-                    headers,
+                    url: `${endpoint}/owa/service.svc`,
+                    headers: {
+                        action: 'FindPeople',
+                        'content-type': 'application/json; charset=UTF-8',
+                        'x-owa-actionname': 'OwaOptionPage',
+                        'x-owa-canary': this.getToken(),
+                        ...(this.getJwt() && { 'authorization': this.getJwt() })
+                    },
                     data: JSON.stringify({
-                        Header: { RequestServerVersion: 'Exchange2013' },
+                        Header: {
+                            RequestServerVersion: 'Exchange2013'
+                        },
                         Body: {
                             IndexedPageItemView: {
                                 __type: 'IndexedPageView:#Exchange',
@@ -70,12 +66,15 @@
                     onerror: this.onajaxerror(reject),
                     onload: _ => {
                         this.updateToken(_);
-                        if (_.status === 200) {
+                        if (_.status == 200) {
                             const responseBody = JSON.parse(_.response).Body;
                             var amazonAddress = responseBody.ResultSet
-                            .filter(_ => _.PersonaTypeString === 'Person')
+                            .filter(_ => Object.keys(_).includes('PersonaTypeString'))
+                            .filter(_ => _.PersonaTypeString == 'Person')
+                            .filter(_ => Object.keys(_).includes('EmailAddress'))
                             .map(_ => _.EmailAddress.EmailAddress)
-                            .find(_ => _.startsWith(username + '@amazon')) || username + '@amazon.com';
+                            .find(_ => _.startsWith(username + '@amazon'));
+                            amazonAddress = amazonAddress || username + '@amazon.com';
                             resolve(amazonAddress);
                         } else {
                             this.onajaxerror(reject)(_);
@@ -89,16 +88,18 @@
                 return this.fetchEmail(username, true);
             });
         },
+
         getAvailability (mailboxes, start, end, currentUserEmail, isSelfView) {
             return new Promise((resolve, reject) => {
                 GM.xmlHttpRequest({
                     method: 'POST',
-                    url: 'https://outlook.office.com/owa/service.svc',
+                    url: `${endpoint}/owa/service.svc`,
                     headers: {
                         action: 'GetUserAvailabilityInternal',
                         'content-type': 'application/json; charset=UTF-8',
                         'x-owa-actionname': 'GetUserAvailabilityInternal_FetchWorkingHours',
-                        'x-owa-canary': this.getToken()
+                        'x-owa-canary': this.getToken(),
+                        ...(this.getJwt() && { 'authorization': this.getJwt() })
                     },
                     data: JSON.stringify({
                         request: {
@@ -187,7 +188,8 @@
                                         action: 'CreateItem',
                                         'content-type': 'application/json; charset=UTF-8',
                                         'x-owa-actionname': 'CreateCalendarItemAction',
-                                        'x-owa-canary': this.getToken()
+                                        'x-owa-canary': this.getToken(),
+                                        ...(this.getJwt() && { 'authorization': this.getJwt() })
                                     },
                                     data: JSON.stringify({
                                         Header: {
@@ -212,10 +214,10 @@
                                                 RequiredAttendees: [{
                                                     __type: 'AttendeeType:#Exchange',
                                                     Mailbox: {
-                                                        EmailAddress: 'hyd-microsites@amazon.com',
+                                                        EmailAddress: 'all-microsites@amazon.com',
                                                         RoutingType: 'SMTP',
                                                         MailboxType: 'Mailbox',
-                                                        OriginalDisplayName: 'hyd-microsites@amazon.com'
+                                                        OriginalDisplayName: 'all-microsites@amazon.com'
                                                     }
                                                 }]
                                             }],
@@ -237,12 +239,13 @@
                             new Promise((resolve, reject) => {
                                 GM.xmlHttpRequest({
                                     method: 'POST',
-                                    url: `${this.endpoint}/owa/service.svc`,
+                                    url: `${endpoint}/owa/service.svc`,
                                     headers: {
                                         action: 'CreateItem',
                                         'content-type': 'application/json; charset=UTF-8',
                                         'x-owa-actionname': 'CreateCalendarItemAction',
-                                        'x-owa-canary': this.getToken()
+                                        'x-owa-canary': this.getToken(),
+                                        ...(this.getJwt() && { 'authorization': this.getJwt() })
                                     },
                                     data: JSON.stringify({
                                         Header: {
@@ -307,12 +310,13 @@
 
                         GM.xmlHttpRequest({
                             method: 'POST',
-                            url: `${this.endpoint}/owa/service.svc`,
+                            url: `${endpoint}/owa/service.svc`,
                             headers: {
                                 action: 'CreateItem',
                                 'content-type': 'application/json; charset=UTF-8',
                                 'x-owa-actionname': 'CreateCalendarItemAction',
-                                'x-owa-canary': this.getToken()
+                                'x-owa-canary': this.getToken(),
+                                ...(this.getJwt() && { 'authorization': this.getJwt() })
                             },
                             data: JSON.stringify({
                                 Header: {
@@ -363,21 +367,24 @@
             }
         },
 
-        getToken() {
-            const token = localStorage.phonetoolCalendarOutlookToken;
-            console.log('Current token:', token);
-            return token;
+        getJwt () {
+            return GM_getValue('outlookJwtToken', '');
+        },
+
+        getToken () {
+            return localStorage.phonetoolCalendarOutlookToken;
         },
 
         updateToken (response) {
             const match = response.responseHeaders.match(/x-owa-canary=(.*?);/i);
             if (match) {
                 localStorage.phonetoolCalendarOutlookToken = match[1];
-            } else {
-                console.warn('Could not update token from response headers');
             }
         }
-    }
+    })
+
+    const EXCHANGE_DATA_PROVIDER = buildDataProvider('exchange', 'https://ballard.amazon.com');
+    const M365_DATA_PROVIDER = buildDataProvider('m365', 'https://outlook.office.com');
 
     function showEmailContentDialog(emailContent, callback) {
         // Convert HTML content to plain text
@@ -487,33 +494,33 @@
         });
     }
 
-function getBody() {
-    return new Promise((resolve) => {
-        const supervisorXPath = "/html/body/div[2]/div[1]/div/div/form/div[1]/div[2]/div[4]/div[2]/p/a";
-        const supervisorElement = document.evaluate(supervisorXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        const supervisorEmail = supervisorElement ? supervisorElement.href.replace('mailto:', '') : 'supervisor@amazon.com';
+    function getBody() {
+        return new Promise((resolve) => {
+            const supervisorXPath = "/html/body/div[2]/div[1]/div/div/form/div[1]/div[2]/div[4]/div[2]/p/a";
+            const supervisorElement = document.evaluate(supervisorXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            const supervisorEmail = supervisorElement ? supervisorElement.href.replace('mailto:', '') : 'supervisor@amazon.com';
 
-        const nameXPath = "/html/body/div[2]/div[7]/div/div[1]/div[2]/div[2]/div/div[1]/div[1]/div[1]/div";
-        const nameElement = document.evaluate(nameXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        let yourName = nameElement ? nameElement.textContent.trim() : '';
+            const nameXPath = "/html/body/div[2]/div[7]/div/div[1]/div[2]/div[2]/div/div[1]/div[1]/div[1]/div";
+            const nameElement = document.evaluate(nameXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            let yourName = nameElement ? nameElement.textContent.trim() : '';
 
-        if (yourName.includes(',')) {
-            yourName = yourName.split(',')[0].trim();
-        }
+            if (yourName.includes(',')) {
+                yourName = yourName.split(',')[0].trim();
+            }
 
-        // Add <br> tags for line breaks in the HTML content
-        const emailContent = `Hello Team,<br><br>
+            // Add <br> tags for line breaks in the HTML content
+            const emailContent = `Hello Team,<br><br>
 I will be out of office on the scheduled dates with no access to outlook, slack and chime.<br><br>
 For project related queries, please reach out to ${supervisorEmail}.<br><br>
 Regards,<br>
 ${yourName}<br>
 =====================================================`;
 
-        showEmailContentDialog(emailContent, (content) => {
-            resolve(content);
+            showEmailContentDialog(emailContent, (content) => {
+                resolve(content);
+            });
         });
-    });
-}
+    }
 
     function getQuickMeetingBody(user) {
         return new Promise((resolve) => {
@@ -571,7 +578,7 @@ This is a quick meeting scheduled through Phonetool Calendar.
 
     function getBusinessHours () {
         const commonWeekdays = [Days.Monday, Days.Tuesday, Days.Wednesday, Days.Thursday];
-        const daysOfWeek = isSundayToThursdayWeek() ? [Days.Sunday, ...commonWeekdays] : [...commonWeekdays, Days.Friday];
+        const daysOfWeek = isSundayToThursdayWeek() ? [Days.Sunday, ...commonWeekdays] : [...commonWeekdays, Days.Friday]; // Days of week
 
         const UTCOffset = getTargetUser().targetUserUTCOffset;
         const offsetInMinutes = moment().utcOffset() - moment().utcOffset(UTCOffset).utcOffset();
@@ -579,30 +586,11 @@ This is a quick meeting scheduled through Phonetool Calendar.
         const startTime = moment().hours(9).minutes(offsetInMinutes).format('HH:mm');
         const endTime = moment().hours(18).minutes(offsetInMinutes).format('HH:mm');
 
+        // This can be simplified when https://github.com/fullcalendar/fullcalendar/issues/4440 is resolved
         return startTime < endTime
             ? { daysOfWeek, startTime, endTime }
         : [{ daysOfWeek, startTime: '00:00', endTime }, { daysOfWeek, startTime, endTime: '24:00' }];
     }
-
-    const buildDataProvider = (name, endpoint) => ({
-        name: name,
-        endpoint: endpoint,
-        onajaxerror(reject) {
-            return _ => {
-                console.error(_);
-                log('error', this.name + ': ' + _.response);
-                reject(_);
-            };
-        },
-
-        fetchEmail: ExchangeDataProvider.fetchEmail,
-        getAvailability: ExchangeDataProvider.getAvailability,
-        createMeeting: ExchangeDataProvider.createMeeting,
-        createQuickMeeting: ExchangeDataProvider.createQuickMeeting, // Add this line
-        getToken: ExchangeDataProvider.getToken,
-        updateToken: ExchangeDataProvider.updateToken
-    });
-
 
     async function getCredentials(dataProvider) {
         const user = getTargetUser().targetUserLogin;
@@ -612,40 +600,6 @@ This is a quick meeting scheduled through Phonetool Calendar.
         const currentEmail = user === currentUser ? email : dataProvider.fetchEmail(currentUser);
         return Promise.all([dataProvider, user, currentUser, email, currentEmail]);
     }
-
-    async function initCredentials() {
-        const providers = [
-            buildDataProvider('m365', 'https://outlook.office.com'),
-            buildDataProvider('exchange', 'https://ballard.amazon.com')
-        ];
-
-        for (const dp of providers) {
-            try {
-                console.info(`Trying to connect to ${dp.name}`);
-                const credentials = await getCredentials(dp);
-                console.log(`Successfully connected to: ${dp.name}`);
-                return credentials;
-            } catch (e) {
-                console.warn(`Failed to connect to ${dp.name}`, e);
-            }
-        }
-        throw 'Cannot get credentials from any data provider';
-    }
-
-
-    const sessionId = new Date % 1e9 + Math.random().toPrecision(3);
-    function log (event, message) {
-        new Image().src = 'https://ptcalendar.corp.amazon.com/ptcalendar.cyder?' + [
-            GM_info.script.name.replace(/\s+/g, '_'),
-            GM_info.script.version,
-            getCurrentUser(),
-            event,
-            message,
-            sessionId,
-            Math.random().toPrecision(3)
-        ].join('&');
-    }
-
 
     function shouldShowMyEvents() {
         const val = localStorage.phonetoolCalendarShowMyEvents;
@@ -822,11 +776,17 @@ This is a quick meeting scheduled through Phonetool Calendar.
         });
     }
 
+    /**
+     * Allows dragging the widget to the widgets area and back. The position is saved in the localStorage
+     *
+     * This is copied and pasted from `enable_widget_movements` method with few overrides
+     */
     function enableContainerDragging (container) {
         const $slots = $('#widgets1, #widgets2, #calendar-container');
         if (!$slots.sortable) {
+            // For unknown reason, some users have an issue when $(...).sortable doesn't work which breaks the tool
+            // This workaround disables container dragging, however, the main functionality remains unimpared
             console.error('$.fn.sortable method is not available');
-            log('error', '$.fn.sortable method is not available');
             return;
         }
         $slots.sortable({
@@ -839,10 +799,12 @@ This is a quick meeting scheduled through Phonetool Calendar.
             placeholder: 'widget-placeholder',
             forceHelperSize: true,
             forcePlaceHolderSize: true,
-            tolerance: 'pointer',
+            tolerance: 'pointer', // Overriden
             over: unsafeWindow.keep_equal_heights,
             update: function () {
                 unsafeWindow.update_positions();
+                // Overriden behavior
+                // Every time after resorting, we calculate and save container position
                 const parentElement = container.parentElement;
                 const parentSelector = '#' + parentElement.id;
                 const itemIndex = [...parentElement.children].findIndex(_ => _ == container);
@@ -857,11 +819,14 @@ This is a quick meeting scheduled through Phonetool Calendar.
                 }
             },
             sort: function (e, ui) {
+                // Overriden behavior
+                // Prevent dropping the default widgets to above the fold area
                 if (ui.item[0] != container && ui.placeholder.parent()[0].id == 'calendar-container') {
                     return false;
                 }
             },
             stop: function () {
+                // Overriden behavior
                 $('#calendar-container').css('min-height', '0');
             }
         });
@@ -931,12 +896,23 @@ This is a quick meeting scheduled through Phonetool Calendar.
         `;
     }
 
+    async function initCredentials() {
+        // Amazon is slowly migrating to M365, some users will be on Exchange others will be on M365
+        for (const dp of [M365_DATA_PROVIDER, EXCHANGE_DATA_PROVIDER]) {
+            try {
+                console.info(`Trying to connect to ${dp.name}`);
+                return await getCredentials(dp);
+            } catch (e) {
+                console.warn(`Failed to connect to ${dp.name}`, e);
+            }
+        }
+        throw 'Cannot get credentials from any data provider';
+    }
+
     async function phonetoolScript () {
         if (!getTargetUser() || !getTargetUser().targetUserActive) {
             return; // The user is inactive or doesn't exist
         }
-
-        log('init');
 
         const credentials = initCredentials();
 
@@ -963,11 +939,13 @@ This is a quick meeting scheduled through Phonetool Calendar.
         parentContainer.insertBefore(container, parentContainer.children[containerIndex]);
         let hasError = false;
 
+        // Awaiting the credentials __before__ actual changes to html in order to fail gracefully
         let dataProvider, user, currentUser, email, currentEmail;
         try {
             [dataProvider, user, currentUser, email, currentEmail] = await credentials;
             console.info("Successfully connected to: ", dataProvider.name);
         } catch(e) {
+            // high chances of missing Microsoft Exchange authentication token: show the error message
             console.error("Unauthorized ", e);
             container.classList.add('error-unauthorized');
             hasError = true;
@@ -982,20 +960,23 @@ This is a quick meeting scheduled through Phonetool Calendar.
           <div class="widget-move-handle">
             ${myEventsButton} ${hireEventsButton}
             <div style="position: absolute; left: 50%; transform: translateX(-50%);">
-              <a href="">
-                Calendar
+              <a href="https://w.amazon.com/bin/view/Scrat/Tools/PhonetoolCalendar/#HChangelog">
+                Calendar Wiki
                 ${localStorage.phonetoolCalendarVersion == GM_info.script.version ? '' : '<b>(see what is new in version ' + GM_info.script.version + ')</b>'}
               </a>
             </div>
           </div>
-    <p class="script-warning">
-        Unable to fetch calendar data, usually due to missing authentication token.<br>
-        If your inbox has migrated to Microsoft 365:<br>
-        Try to login on <a href="https://outlook.office.com/owa">M365</a> and then refresh this page.<br>
-        <br>
-        If your inbox is still on Exchange:<br>
-        Try to login on <a href="https://ballard.amazon.com/owa">Exchange</a> and then refresh this page.<br>
-    </p>
+          <p class="script-warning">
+            Unable to fetch calendar data, usually due to missing authentication token.<br>
+            If your inbox has migrated to Microsoft 365:<br>
+            Try to login on <a href="${M365_DATA_PROVIDER.endpoint}/owa">${M365_DATA_PROVIDER.name}</a> and then refresh this page.<br>
+            <br>
+            If your inbox is still on Exchange:<br>
+            Try to login on <a href="${EXCHANGE_DATA_PROVIDER.endpoint}/owa">${EXCHANGE_DATA_PROVIDER.name}</a> and then refresh this page.<br>
+            <br>
+            For more information please check out <a href="https://w.amazon.com/bin/view/Scrat/Tools/PhonetoolCalendar#HTroubleshooting2FFAQ">the Calendar's wiki page</a> that is being kept updated.<br>
+            <br>
+           </p>
           <div id="cc-content" class="calendar-container"></div>
           <hr>
         `;
@@ -1022,6 +1003,7 @@ This is a quick meeting scheduled through Phonetool Calendar.
 
         enableContainerDragging(container);
 
+        // Stop rendering the calendar, if the user is missing (due to some load error)
         if (!user) {
             return;
         }
@@ -1061,65 +1043,36 @@ This is a quick meeting scheduled through Phonetool Calendar.
             nowIndicator: true,
             hiddenDays: getWeekend(),
             initialView: 'timeGridWeek',
-            navLinks: true,
+            navLinks: true, // can click day/week names to navigate views
+            // editable: true,
             scrollTime: '09:00:00',
             selectable: true,
             selectMirror: true,
-            select: async function(selectionInfo) {
+            select: function(selectionInfo) {
                 const [start, end] = [selectionInfo.start, selectionInfo.end];
-                log('select');
-
                 if (start < moment()._d) {
                     alert('Cannot create a meeting in the past');
-                    return;
-                }
-
-                const meetingType = prompt('Select meeting type (1: OOTO, 2: Quick Meeting):');
-
-                try {
-                    let result;
-                    if (meetingType === '1') { // OOTO
-                        result = await dataProvider.createMeeting({
-                            meetingType: MEETING_TYPES.OOTO,
-                            organizer: currentEmail,
-                            start,
-                            end
-                        });
-
-                        if (result === true) { // Only if meeting was actually created
-                            alert('OOTO meetings created successfully!');
-                            calendar.addEvent({ start, end });
-                            log('create_meeting', dataProvider.name);
+                } else {
+                    const subject = prompt(`${subjectText}. If agree, please enter the subject.`);
+                    if (subject !== null) {
+                        const requiredAttendees = [{ email: 'meet@chime.aws' }];
+                        if (email != currentEmail) {
+                            requiredAttendees.push({ email });
                         }
-                    }
-                    else if (meetingType === '2') { // Quick Meeting
-                        result = await dataProvider.createMeeting({
-                            meetingType: MEETING_TYPES.QUICK,
-                            subject: `Quick meeting with @${user}`,
-                            organizer: currentEmail,
-                            requiredAttendees: [
-                                { email: `${user}@amazon.com` },
-                                { email: 'meet@chime.aws' }
-                            ],
-                            start,
-                            end,
-                            user: user
-                        });
-
-                        if (result === true) { // Only if meeting was actually created
-                            alert('Quick meeting created successfully!');
+                        dataProvider.createMeeting({ subject, organizer: currentEmail, requiredAttendees, start, end })
+                            .then(_ => {
+                            alert(`The meeting "${subject}" is successfully created!`);
                             calendar.addEvent({ start, end });
-                            log('create_meeting', dataProvider.name);
-                        }
+                        })
+                            .catch(_ => {
+                            console.error(_);
+                            alert('Error');
+                        });
                     }
-                } catch (error) {
-                    console.error(error);
-                    alert('Error creating meeting');
                 }
-
                 calendar.unselect();
             },
-            dayMaxEventRows: true,
+            dayMaxEventRows: true, // allow "more" link when too many events
             events: function (fetchInfo, successCallback, failureCallback) {
                 const mailboxes = [email];
                 if (email != currentEmail && shouldShowMyEvents()) {
@@ -1127,12 +1080,10 @@ This is a quick meeting scheduled through Phonetool Calendar.
                 }
 
                 dataProvider.getAvailability(mailboxes, fetchInfo.start, fetchInfo.end, mailboxes[1], isSelfView).then(events => {
-                    log('fetch', JSON.stringify([dataProvider.name, mailboxes, fetchInfo.start, fetchInfo.end]));
                     const convertedEvents = convertEvents(events);
                     successCallback([].concat(...convertedEvents));
                 }).catch(e => {
-                    console.error(e);
-                    log('error', dataProvider.name + ': ' + e.response);
+                    console.error('Error fetching from ', dataProvider.name, ': ', e)
                 });
             }
         };
@@ -1150,6 +1101,42 @@ This is a quick meeting scheduled through Phonetool Calendar.
     container.className = 'ooto-widget';
     document.querySelector('.SharePassion').prepend(container);
     createOOTOForm(container);
+
     phonetoolScript();
+
+    // Token interception for outlook.office.com
+    if (window.location.hostname === 'outlook.office.com') {
+        // Intercept fetch requests
+        const originalFetch = unsafeWindow.fetch || window.fetch;
+        const interceptedFetch = function(...args) {
+            const [resource, config] = args;
+            const url = typeof resource === 'string' ? resource : resource.url;
+
+            if (url && url.includes('/owa/service.svc') && config && config.headers) {
+                const headers = config.headers;
+                let authHeader = null;
+
+                // Headers can be a Headers object, plain object, or array
+                if (headers instanceof Headers) {
+                    authHeader = headers.get('authorization');
+                } else if (Array.isArray(headers)) {
+                    const authEntry = headers.find(([key]) => key.toLowerCase() === 'authorization');
+                    authHeader = authEntry ? authEntry[1] : null;
+                } else if (typeof headers === 'object') {
+                    authHeader = headers.authorization || headers.Authorization;
+                }
+
+                if (authHeader) {
+                    GM_setValue('outlookJwtToken', authHeader);
+                }
+            }
+
+            return originalFetch.apply(unsafeWindow || window, args);
+        };
+
+        // Replace fetch
+        if (unsafeWindow) unsafeWindow.fetch = interceptedFetch;
+        window.fetch = interceptedFetch;
+    }
 
 })();
